@@ -58,7 +58,7 @@ def _decodificar(b):
 
 
 def _get(url, con_clave=True, binario=False, intentos=8):
-    headers = {"api_key": os.environ["AEMET_API_KEY"]} if con_clave else {}
+    headers = {"api_key": os.environ["AEMET_API_KEY"].strip().strip("\"'")} if con_clave else {}
     for i in range(intentos):
         _espera()
         r = requests.get(url, headers=headers, timeout=60)

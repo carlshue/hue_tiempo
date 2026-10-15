@@ -7,7 +7,9 @@ si quiere también el mapa de España y la hora de envío. Se guarda en SQLite (
 Variables: TELEGRAM_BOT_TOKEN, AEMET_API_KEY, DATA_DIR (carpeta persistente), DB_PATH (opcional)
 Comandos: /start /ajustes /ahora /parar /reanudar /borrar /ayuda
 """
+import logging
 import os
+import sys
 import threading
 import time
 import traceback
@@ -19,7 +21,9 @@ import ccaa as C
 import db
 import render
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("bot")
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip("\"'")  # por si se pegó con comillas o espacios
 URL = f"https://api.telegram.org/bot{TOKEN}"
 SALIDAS = aemet.DATA / "salidas"
 SALIDAS.mkdir(parents=True, exist_ok=True)
@@ -31,9 +35,12 @@ HORAS = (7, 8, 9, 13, 20)
 def tg(metodo, **params):
     try:
         r = requests.post(f"{URL}/{metodo}", json=params, timeout=70)
-        return r.json()
+        datos = r.json()
+        if not datos.get("ok"):
+            log.warning("Telegram %s -> %s %s", metodo, datos.get("error_code"), datos.get("description"))
+        return datos
     except Exception as e:
-        print("tg error", metodo, e)
+        log.warning("Telegram %s falló: %s", metodo, e)
         return {}
 
 
@@ -41,7 +48,7 @@ def enviar_foto(chat, ruta, caption=""):
     with open(ruta, "rb") as f:
         r = requests.post(f"{URL}/sendPhoto", data={"chat_id": chat, "caption": caption[:1000]}, files={"photo": f}, timeout=90)
     if not r.ok:
-        print("sendPhoto falló", r.status_code, r.text[:200])
+        log.warning("sendPhoto a %s falló: %s %s", chat, r.status_code, r.text[:200])
     return r.ok
 
 
@@ -136,6 +143,7 @@ def enviar_a_usuario(u, forzar=False):
     if u["modo"] == "adversos" and not forzar:
         db.actualizar(u["telegram_id"], ultima_comprob=hoy)
         if not grupos or firma == u.get("ultima_firma"):
+            log.info("usuario %s (%s, adversos): nada nuevo que enviar", u["telegram_id"], u["ccaa"])
             return False  # nada nuevo que contar
     nombre = C.CCAA[u["ccaa"]]["nombre"]
     if grupos:
@@ -145,6 +153,7 @@ def enviar_a_usuario(u, forzar=False):
     ok = enviar_foto(u["telegram_id"], _imagen(u["ccaa"], u["dias"]), cap)
     if u["nacional"]:
         enviar_foto(u["telegram_id"], _imagen(u["ccaa"], u["dias"], nacional=True), "España")
+    log.info("usuario %s (%s, %s, %sd): envío %s", u["telegram_id"], u["ccaa"], u["modo"], u["dias"], "OK" if ok else "FALLÓ")
     if ok:
         db.actualizar(u["telegram_id"], ultima_comprob=hoy, ultima_firma=firma)
     return ok
@@ -161,10 +170,10 @@ def planificador():
                     try:
                         enviar_a_usuario(u)
                     except Exception:
-                        traceback.print_exc()
+                        log.exception("error")
                         db.actualizar(u["telegram_id"], ultima_comprob=hoy)  # no reintentar en bucle
         except Exception:
-            traceback.print_exc()
+            log.exception("error")
         time.sleep(30)
 
 
@@ -182,7 +191,7 @@ def enviar_ahora(chat, u):
     try:
         enviar_a_usuario(u, forzar=True)
     except Exception:
-        traceback.print_exc()
+        log.exception("error")
         tg("sendMessage", chat_id=chat, text="No he podido obtener los datos de AEMET ahora mismo. Inténtalo en unos minutos.")
 
 
@@ -192,6 +201,7 @@ def on_mensaje(m):
     nombre = m["from"].get("first_name", "")
     texto = (m.get("text") or "").split("@")[0].strip().lower()
     u = db.asegurar(uid, nombre)
+    log.info("mensaje de %s: %s", uid, texto)
     if texto in ("/start", "/configurar"):
         tg("sendMessage", chat_id=chat, text="¡Hola! Vamos a configurarlo en unos toques.")
         mostrar(chat, "ccaa", u, wiz=True)
@@ -219,6 +229,7 @@ def on_callback(q):
     tg("answerCallbackQuery", callback_query_id=q["id"])
     u = db.asegurar(uid, q["from"].get("first_name", ""))
     d = q["data"].split(":")
+    log.info("botón de %s: %s", uid, q["data"])
     if d[0] == "p":                                  # abrir pantalla
         mostrar(chat, d[1], u, msg=msg)
     elif d[0] == "s":                                # guardar un valor
@@ -248,7 +259,13 @@ def main():
     tg("setMyCommands", commands=[{"command": c, "description": t} for c, t in (
         ("start", "Configurar el bot"), ("ajustes", "Ver o cambiar ajustes"), ("ahora", "Recibir el mapa ya"),
         ("parar", "Pausar envíos"), ("reanudar", "Reanudar envíos"), ("borrar", "Borrar mis datos"))])
-    print("Bot en marcha")
+    while True:
+        yo = tg("getMe")
+        if yo.get("ok"):
+            log.info("Bot en marcha como @%s", yo["result"]["username"])
+            break
+        log.error("No puedo conectar con Telegram (¿token incorrecto en TELEGRAM_BOT_TOKEN?): %s", yo)
+        time.sleep(60)
     offset = None
     while True:
         r = tg("getUpdates", offset=offset, timeout=50, allowed_updates=["message", "callback_query"])
@@ -260,7 +277,7 @@ def main():
                 elif "callback_query" in up:
                     threading.Thread(target=on_callback, args=(up["callback_query"],), daemon=True).start()
             except Exception:
-                traceback.print_exc()
+                log.exception("error")
         if not r.get("ok", True):
             time.sleep(5)
 
