@@ -3,3 +3,4 @@ numpy
 scipy
 requests
 pillow
+tzdata
