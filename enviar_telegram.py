@@ -11,6 +11,11 @@ from pathlib import Path
 import requests
 
 HERE = Path(__file__).parent
+if (HERE / ".env").exists():  # en local; en Railway vienen de Variables
+    for linea in (HERE / ".env").read_text(encoding="utf8").splitlines():
+        if "=" in linea:
+            k, v = linea.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 salida = HERE / "tiempo_murcia.png"
 subprocess.run([sys.executable, str(HERE / "mapa_tiempo_murcia.py"), "--refresh", "--salida", str(salida)], check=True)
 
