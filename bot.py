@@ -9,6 +9,7 @@ Comandos: /start /ajustes /ahora /parar /reanudar /borrar /ayuda
 """
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -25,6 +26,35 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %
 log = logging.getLogger("bot")
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip("\"'")  # por si se pegó con comillas o espacios
 URL = f"https://api.telegram.org/bot{TOKEN}"
+
+# Solo IPv4: en algunos contenedores (Railway) IPv6 no tiene salida y provoca "Network is unreachable"
+import urllib3.util.connection as _uc  # noqa: E402
+_uc.allowed_gai_family = lambda: socket.AF_INET
+
+
+def _limpiar(texto):
+    """Quita el token de cualquier texto que vaya a los logs."""
+    return str(texto).replace(TOKEN, "<token>")
+
+
+def diagnostico_red():
+    """Registra si hay salida a internet: DNS y conexión TCP a Telegram, AEMET y un servidor de referencia."""
+    for host in ("api.telegram.org", "opendata.aemet.es", "1.1.1.1"):
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except Exception as e:
+            log.error("red: DNS de %s falla: %s", host, e)
+            continue
+        for fam, _, _, _, addr in infos[:3]:
+            try:
+                c = socket.socket(fam, socket.SOCK_STREAM)
+                c.settimeout(6)
+                c.connect(addr[:2])
+                c.close()
+                res = "OK"
+            except Exception as e:
+                res = f"FALLA ({e})"
+            log.info("red: %s %s %s -> %s", host, "IPv6" if fam == socket.AF_INET6 else "IPv4", addr[0], res)
 SALIDAS = aemet.DATA / "salidas"
 SALIDAS.mkdir(parents=True, exist_ok=True)
 LOCK_RENDER = threading.Lock()  # matplotlib no es thread-safe
@@ -40,7 +70,7 @@ def tg(metodo, **params):
             log.warning("Telegram %s -> %s %s", metodo, datos.get("error_code"), datos.get("description"))
         return datos
     except Exception as e:
-        log.warning("Telegram %s falló: %s", metodo, e)
+        log.warning("Telegram %s falló: %s", metodo, _limpiar(e)[:300])
         return {}
 
 
@@ -259,12 +289,17 @@ def main():
     tg("setMyCommands", commands=[{"command": c, "description": t} for c, t in (
         ("start", "Configurar el bot"), ("ajustes", "Ver o cambiar ajustes"), ("ahora", "Recibir el mapa ya"),
         ("parar", "Pausar envíos"), ("reanudar", "Reanudar envíos"), ("borrar", "Borrar mis datos"))])
+    diagnostico_red()
+    intentos = 0
     while True:
         yo = tg("getMe")
         if yo.get("ok"):
             log.info("Bot en marcha como @%s", yo["result"]["username"])
             break
-        log.error("No puedo conectar con Telegram (¿token incorrecto en TELEGRAM_BOT_TOKEN?): %s", yo)
+        intentos += 1
+        log.error("No puedo conectar con Telegram: %s", yo or "sin respuesta (problema de red)")
+        if intentos % 5 == 0:
+            diagnostico_red()
         time.sleep(60)
     offset = None
     while True:
