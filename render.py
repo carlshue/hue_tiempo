@@ -468,81 +468,103 @@ def _periodos(lista, minimo):
     return out
 
 
-def horas_hoy(cc, minimo=20):
-    """Desglose horario de hoy de la ciudad de referencia, solo si hay probabilidad de lluvia (>= minimo %)."""
+def horas_24h(cc, minimo=20):
+    """Desglose horario de las próximas 24 h de la ciudad de referencia, solo si hay probabilidad de lluvia (>= minimo %)."""
     try:
         ref = next(iter(cc["ciudades"]))
-        d = aemet.horaria(cc["ciudades"][ref][0])["dias"]
-        hoy = aemet.hoy_madrid().strftime("%Y-%m-%d")
-        dia = next(x for x in d if x["fecha"][:10] == hoy)
+        dias = aemet.horaria(cc["ciudades"][ref][0])["dias"]
     except Exception as e:
         print("aviso: sin predicción horaria", e)
         return None
-    cielo = {int(e["periodo"]): sky_kind(e["value"]) for e in dia.get("estadoCielo", []) if e.get("value") and e["periodo"].isdigit()}
-    horas = []
-    for p in dia.get("precipitacion", []):
-        try:
-            horas.append((int(p["periodo"]), float(p["value"] or 0), cielo.get(int(p["periodo"]), "nuboso")))
-        except ValueError:
-            pass
-    horas = sorted(x for x in horas if x[0] >= aemet.hoy_madrid().hour)   # solo las horas que quedan
-    probs = _periodos(dia.get("probPrecipitacion"), minimo)
+    ahora = aemet.hoy_madrid().replace(tzinfo=None, minute=0, second=0, microsecond=0)
+    fin = ahora + timedelta(hours=24)
+    horas, probs, tormentas = [], [], []
+    for dia in dias:
+        f0 = datetime.fromisoformat(dia["fecha"][:10])
+        cielo = {int(e["periodo"]): sky_kind(e["value"]) for e in dia.get("estadoCielo", []) if e.get("value") and e["periodo"].isdigit()}
+        for p in dia.get("precipitacion", []):
+            try:
+                h = int(p["periodo"])
+                dt = f0 + timedelta(hours=h)
+                if ahora <= dt < fin:
+                    horas.append((dt, float(p["value"] or 0), cielo.get(h, "nuboso")))
+            except ValueError:
+                pass
+        for lista, destino, mn in ((dia.get("probPrecipitacion"), probs, minimo), (dia.get("probTormenta"), tormentas, 30)):
+            for h0, h1, v in _periodos(lista, mn):
+                ini = f0 + timedelta(hours=h0)
+                fin_p = f0 + timedelta(hours=h1 if h1 > h0 else h1 + 24)
+                if fin_p > ahora and ini < fin:
+                    destino.append((ini, h0, h1, v))
+    horas.sort()
     if not horas or not probs:
         return None
-    return dict(ciudad=ref, horas=horas, prob=probs, tormenta=_periodos(dia.get("probTormenta"), 30))
+    return dict(ciudad=ref, horas=horas, prob=probs, tormenta=tormentas, ahora=ahora)
 
 
-def _rangos(hs):
+def _fmt_h(dt, ahora):
+    return f"{dt.hour} h" if dt.date() == ahora.date() else f"{DIAS[dt.weekday()]} {dt.hour} h"
+
+
+def _rangos(dts, ahora):
     out, ini, ant = [], None, None
-    for h in hs:
+    for d in dts:
         if ini is None:
-            ini = ant = h
-        elif h == ant + 1:
-            ant = h
+            ini = ant = d
+        elif d - ant == timedelta(hours=1):
+            ant = d
         else:
-            out.append((ini, ant)); ini = ant = h
+            out.append((ini, ant)); ini = ant = d
     if ini is not None:
         out.append((ini, ant))
-    return [f"a las {a} h" if a == b else f"de {a} a {b + 1} h" for a, b in out]
+    return [f"a las {a.hour} h" + ("" if a.date() == ahora.date() else f" ({DIAS[a.weekday()]})") if a == b else f"de {_fmt_h(a, ahora)} a {_fmt_h(b + timedelta(hours=1), ahora)}" for a, b in out]
 
 
 def panel_horas(ax, datos, y0):
-    """Franja inferior: barras de lluvia por hora (mm) + iconos de cielo + resumen en texto."""
-    horas = datos["horas"]
-    mojadas = [h for h, mm, k in horas if mm >= 0.1 or k in ("lluvia", "tormenta", "llovizna")]
+    """Franja inferior: barras de lluvia por hora (mm) + iconos de cielo + resumen en texto, de ahora a +24 h."""
+    horas, ahora = datos["horas"], datos["ahora"]
+    mojadas = [d for d, mm, k in horas if mm >= 0.1 or k in ("lluvia", "tormenta", "llovizna")]
     total = sum(mm for _, mm, _ in horas)
     pico = max(horas, key=lambda x: x[1])
-    top = y0 + EXTRA_HORAS
-    txt(ax, 56, y0 + 325, f"LLUVIA DE HOY POR HORAS · {datos['ciudad']}", size=27, ha="left", color=AZUL)
-    stroke(ax, [[56, y0 + 297], [56 + 560, y0 + 297]], color=AZUL, lw=4, amp=1.5)
+    txt(ax, 56, y0 + 325, f"LLUVIA EN LAS PRÓXIMAS 24 H · {datos['ciudad']}", size=27, ha="left", color=AZUL)
+    stroke(ax, [[56, y0 + 297], [56 + 700, y0 + 297]], color=AZUL, lw=4, amp=1.5)
     if mojadas:
-        res = f"Llueve {' y '.join(_rangos(mojadas)[:3])}"
+        rangos = _rangos(mojadas, ahora)
+        res = "Llueve " + " y ".join(rangos[:3]) + (" …" if len(rangos) > 3 else "")
         if pico[1] >= 0.1:
-            res += f" · máx {pico[1]:g} mm/h a las {pico[0]} h · total ~{total:.1f} mm"
+            res += f" · máx {pico[1]:g} mm/h ({_fmt_h(pico[0], ahora)}) · total ~{total:.1f} mm"
     else:
-        res = "Sin lluvia apreciable en las horas que quedan"
+        res = "Sin lluvia apreciable en las próximas 24 h"
     txt(ax, 56, y0 + 262, res, size=21, ha="left", color=NEGRO)
-    pr = "  ·  ".join(f"{v}% ({a:02d}–{b:02d} h)" for a, b, v in datos["prob"])
-    tor = "  ·  ".join(f"tormenta {v}% ({a:02d}–{b:02d} h)" for a, b, v in datos["tormenta"])
-    txt(ax, 56, y0 + 230, "Probabilidad: " + pr + (f"   |   {tor}" if tor else ""), size=15, ha="left", color="#555a63")
+
+    def tramo(ini, h0, h1, v, pref=""):
+        return f"{pref}{v}% ({_fmt_h(ini, ahora).replace(' h', '')}–{h1:02d} h)"
+    pr = "  ·  ".join(tramo(i, a, b, v) for i, a, b, v in datos["prob"])
+    tor = "  ·  ".join(tramo(i, a, b, v, "tormenta ") for i, a, b, v in datos["tormenta"])
+    linea = "Probabilidad: " + pr + (f"   |   {tor}" if tor else "")
+    txt(ax, 56, y0 + 230, linea if len(linea) < 150 else linea[:147] + "…", size=15, ha="left", color="#555a63")
     n = len(horas)
-    x_ini, x_fin = 110, W - 90
+    x_ini, x_fin = 110, W - 70
     slot = min(120, (x_fin - x_ini) / n)
-    base, hmax = y0 + 65, 70
+    base, hmax = y0 + 70, 70
     mmax = max(2.0, pico[1])
     stroke(ax, [[x_ini - 30, base], [x_ini + slot * n + 10, base]], color=NEGRO, lw=3, amp=1.0, doble=False)
-    for i, (h, mm, kind) in enumerate(horas):
+    for i, (dt, mm, kind) in enumerate(horas):
         cx = x_ini + slot * (i + 0.5)
-        icon(ax, kind, cx, y0 + 178, min(0.5, slot / 130))
+        icon(ax, kind, cx, y0 + 178, min(0.5, slot / 135))
         if mm > 0:
             hb = max(8, mm / mmax * hmax)
             bw = slot * 0.55
             caja = [[cx - bw / 2, base], [cx + bw / 2, base], [cx + bw / 2, base + hb], [cx - bw / 2, base + hb]]
             ax.add_patch(MPoly(caja, fc="#8fb3e0", ec="none", zorder=5))
             stroke(ax, caja, color=AZUL, lw=2.6, amp=0.8, closed=True, z=6, doble=False)
-            txt(ax, cx, base + hb + 14, f"{mm:g}", size=13, color=AZUL)
-        txt(ax, cx, base - 22, f"{h}", size=16, color=NEGRO)
-    txt(ax, x_ini - 55, base - 22, "hora", size=12, color="#7d838c")
+            txt(ax, cx, base + hb + 13, f"{mm:g}", size=11.5 if slot < 90 else 13, color=AZUL)
+        txt(ax, cx, base - 20, f"{dt.hour}", size=15, color=NEGRO)
+        if i == 0 or dt.hour == 0:
+            txt(ax, cx, base - 42, f"{DIAS[dt.weekday()]} {dt.day}", size=13, color=ROJO)
+            if dt.hour == 0 and i > 0:
+                stroke(ax, [[cx - slot / 2, base - 30], [cx - slot / 2, y0 + 150]], color="#9aa0a8", lw=2, amp=0.5, doble=False, ls=(0, (4, 4)))
+    txt(ax, x_ini - 55, base - 20, "hora", size=12, color="#7d838c")
     txt(ax, x_ini - 55, base + hmax / 2, "mm/h", size=12, color="#7d838c")
 
 
@@ -719,7 +741,7 @@ def generar_ccaa(clave, ndias, salida, demo=False):
     gp = prov_geo()
     lim = limites(gp, cc["provincias"])
     lay = LAYOUT[elegir_layout(lim)]
-    horas = horas_hoy(cc)
+    horas = horas_24h(cc)
     extra = EXTRA_HORAS if horas else 0
     fig, ax = lienzo(extra)
     proj = Proyeccion(lay["pbox"], *lim)
