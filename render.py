@@ -425,10 +425,12 @@ def resumen_alertas(grupos, maximo=6):
 
 def preparar(clave, ndias, demo=False):
     cc = C.CCAA[clave]
-    pred = {}
+    pred, elab = {}, []
     for nombre in cc["ciudades"]:
         try:
-            pred[nombre] = aemet.forecast(cc["ciudades"][nombre][0])["dias"]
+            f = aemet.forecast(cc["ciudades"][nombre][0])
+            pred[nombre] = f["dias"]
+            elab.append(f.get("elaborado", ""))
         except Exception as e:  # un municipio caído no tumba el mapa
             print("aviso: sin datos de", nombre, e)
     if not pred:
@@ -445,13 +447,13 @@ def preparar(clave, ndias, demo=False):
         semana.append(dict(ref, region_prob=max(d["prob"] for d in pc.values()),
                            lluvia_en=[n for n, d in pc.items() if d["prob"] >= 40], n_ciudades=len(pc)))
     hoy = {n: day_summary(v[0]) for n, v in pred.items()}
-    return cc, pred, hoy, semana, activos
+    return cc, pred, hoy, semana, activos, max(elab or [""])
 
 
 # ───────────────────────── composición ─────────────────────────
 LAYOUT = {
     "tall": dict(box=(40, 40, 860, 1160), pbox=(70, 70, 850, 1130), logo=(905, 975), bub=(1170, 1875), fs=22, pitch=36, wrap=47,
-                 av=(890, 790), av_w=1880, sem=(890, 1880, 655, 600, 70), compact=False),
+                 av=(890, 815), av_w=1880, sem=(890, 1880, 655, 600, 70), compact=False),
     "wide": dict(box=(40, 560, 1000, 1165), pbox=(60, 575, 985, 1150), logo=(1030, 1000), bub=(1290, 1875), fs=20, pitch=32, wrap=41,
                  av=(1030, 765), av_w=1880, sem=(40, 1880, 520, 460, 60), compact=True),
 }
@@ -505,7 +507,7 @@ def bloque_avisos(ax, lay, grupos):
             size=17, ha="left", color=NEGRO)
         zs = ", ".join(sorted(set(z.replace("Costa - ", "") for z in zonas)))
         txt(ax, ax_x + 370, yy - 22, zs if len(zs) < ancho_zonas else zs[:ancho_zonas - 3] + "…", size=12.5, ha="left", color="#555a63")
-        yy -= 50
+        yy -= 46
     if len(grupos) > 3:
         txt(ax, ax_x + 150, yy + 8, f"…y {len(grupos) - 3} más (aemet.es)", size=14, ha="left", color="#555a63")
 
@@ -556,6 +558,8 @@ def bloque_semana(ax, lay, semana, grupos):
             txt(ax, cx, top - off["pct"] - 24, f"{len(s['lluvia_en'])}/{s['n_ciudades']} municipios", size=12.5, color="#555a63")
         if av:
             av.sort(key=lambda a: -NIVEL_RANK[a[1]])
+            vistos = set()
+            av = [a for a in av if not (a[0] in vistos or vistos.add(a[0]))]
             pb = bot + (70 if compact else 90)
             pill(ax, cx, pb, min(cw - 36, 200), 34, ROJO)
             txt(ax, cx, pb, "¡AVISO!", size=19, color="#ffffff", weight="bold")
@@ -599,17 +603,17 @@ def lienzo():
     return fig, ax
 
 
-def decoraciones(ax):
+def decoraciones(ax, nota="Datos: AEMET OpenData"):
     for k, c in enumerate((NEGRO, AZUL, ROJO, VERDE)):
         ax.add_patch(FancyBboxPatch((1000 + k * 60, 12), 44, 14, boxstyle="round,pad=0,rounding_size=6", fc=c, ec="#00000066", lw=1.2, zorder=9))
     for (mx, my, c) in ((24, 1176, ROJO), (1896, 1176, AZUL), (24, 24, VERDE), (1896, 24, AMARILLO)):
         magnet(ax, mx, my, c, 14)
-    txt(ax, W - 40, 20, "Datos: AEMET OpenData", size=12, ha="right", color="#8a8f97")
+    txt(ax, W - 40, 20, nota, size=12, ha="right", color="#8a8f97")
 
 
 def generar_ccaa(clave, ndias, salida, demo=False):
     """Genera la imagen de una comunidad. Devuelve (grupos de avisos, firma)."""
-    cc, pred, hoy, semana, activos = preparar(clave, ndias, demo)
+    cc, pred, hoy, semana, activos, elab = preparar(clave, ndias, demo)
     grupos = agrupar(activos)
     por_zona = {}
     for a in activos:
@@ -627,7 +631,12 @@ def generar_ccaa(clave, ndias, salida, demo=False):
     presentador(ax, lay, resumen(semana, grupos))
     bloque_avisos(ax, lay, grupos)
     bloque_semana(ax, lay, semana, grupos)
-    decoraciones(ax)
+    try:
+        ed = datetime.fromisoformat(elab)
+        nota = f"Datos: AEMET · predicción de {ed.day}/{ed.month} {ed:%H:%M}"
+    except ValueError:
+        nota = "Datos: AEMET OpenData"
+    decoraciones(ax, nota)
     postprocesar(fig, salida)
     plt.close(fig)
     return grupos, firma_avisos(grupos)

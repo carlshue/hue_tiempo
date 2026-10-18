@@ -79,13 +79,24 @@ def _cached(nombre, ttl, fn):
     return datos
 
 
-def forecast(ine, ttl=3 * 3600):
-    """Predicción diaria de un municipio: {'nombre', 'dias': [...]}"""
+def forecast(ine, ttl=2 * 3600):
+    """Predicción diaria de un municipio: {'nombre', 'elaborado', 'dias': [...]}, solo desde hoy (hora de Madrid).
+
+    Si lo guardado en caché es de un día anterior (o AEMET aún no ha publicado hoy), se vuelve a pedir.
+    """
     def pedir():
         meta = _get(f"{API}/prediccion/especifica/municipio/diaria/{ine}")
         d = _get(meta["datos"], con_clave=False)[0]
-        return {"nombre": d.get("nombre", ""), "dias": d["prediccion"]["dia"]}
-    return _cached(f"pred_{ine}.json", ttl, pedir)
+        return {"nombre": d.get("nombre", ""), "elaborado": d.get("elaborado", ""), "dias": d["prediccion"]["dia"]}
+
+    hoy = hoy_madrid().strftime("%Y-%m-%d")
+    f = DATA / f"pred_{ine}.json"
+    datos = _cached(f"pred_{ine}.json", ttl, pedir)
+    if datos["dias"] and datos["dias"][0]["fecha"][:10] < hoy:   # datos de ayer: refrescar
+        f.unlink(missing_ok=True)
+        datos = _cached(f"pred_{ine}.json", ttl, pedir)
+    datos = dict(datos, dias=[d for d in datos["dias"] if d["fecha"][:10] >= hoy])
+    return datos
 
 
 def alertas(area, ttl=3600):
