@@ -99,6 +99,17 @@ def forecast(ine, ttl=2 * 3600):
     return datos
 
 
+def horaria(ine, ttl=3600):
+    """Predicción horaria de un municipio (hoy y los 1-2 días siguientes), solo desde hoy."""
+    def pedir():
+        meta = _get(f"{API}/prediccion/especifica/municipio/horaria/{ine}")
+        d = _get(meta["datos"], con_clave=False)[0]
+        return {"elaborado": d.get("elaborado", ""), "dias": d["prediccion"]["dia"]}
+    datos = _cached(f"hor_{ine}.json", ttl, pedir)
+    hoy = hoy_madrid().strftime("%Y-%m-%d")
+    return dict(datos, dias=[d for d in datos["dias"] if d["fecha"][:10] >= hoy])
+
+
 def alertas(area, ttl=3600):
     """Avisos CAP vigentes de una comunidad (área '61'..'79') o de toda España ('esp')."""
     def pedir():

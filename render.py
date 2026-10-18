@@ -450,6 +450,102 @@ def preparar(clave, ndias, demo=False):
     return cc, pred, hoy, semana, activos, max(elab or [""])
 
 
+# ───────────────────────── lluvia de hoy por horas ─────────────────────────
+EXTRA_HORAS = 350
+
+
+def _periodos(lista, minimo):
+    """probPrecipitacion/probTormenta horarias: periodo '1420' = de 14 a 20 h."""
+    out = []
+    for p in lista or []:
+        try:
+            v = int(p["value"])
+        except (ValueError, KeyError):
+            continue
+        per = p["periodo"]
+        if v >= minimo and len(per) == 4:
+            out.append((int(per[:2]), int(per[2:]), v))
+    return out
+
+
+def horas_hoy(cc, minimo=20):
+    """Desglose horario de hoy de la ciudad de referencia, solo si hay probabilidad de lluvia (>= minimo %)."""
+    try:
+        ref = next(iter(cc["ciudades"]))
+        d = aemet.horaria(cc["ciudades"][ref][0])["dias"]
+        hoy = aemet.hoy_madrid().strftime("%Y-%m-%d")
+        dia = next(x for x in d if x["fecha"][:10] == hoy)
+    except Exception as e:
+        print("aviso: sin predicción horaria", e)
+        return None
+    cielo = {int(e["periodo"]): sky_kind(e["value"]) for e in dia.get("estadoCielo", []) if e.get("value") and e["periodo"].isdigit()}
+    horas = []
+    for p in dia.get("precipitacion", []):
+        try:
+            horas.append((int(p["periodo"]), float(p["value"] or 0), cielo.get(int(p["periodo"]), "nuboso")))
+        except ValueError:
+            pass
+    horas = sorted(x for x in horas if x[0] >= aemet.hoy_madrid().hour)   # solo las horas que quedan
+    probs = _periodos(dia.get("probPrecipitacion"), minimo)
+    if not horas or not probs:
+        return None
+    return dict(ciudad=ref, horas=horas, prob=probs, tormenta=_periodos(dia.get("probTormenta"), 30))
+
+
+def _rangos(hs):
+    out, ini, ant = [], None, None
+    for h in hs:
+        if ini is None:
+            ini = ant = h
+        elif h == ant + 1:
+            ant = h
+        else:
+            out.append((ini, ant)); ini = ant = h
+    if ini is not None:
+        out.append((ini, ant))
+    return [f"a las {a} h" if a == b else f"de {a} a {b + 1} h" for a, b in out]
+
+
+def panel_horas(ax, datos, y0):
+    """Franja inferior: barras de lluvia por hora (mm) + iconos de cielo + resumen en texto."""
+    horas = datos["horas"]
+    mojadas = [h for h, mm, k in horas if mm >= 0.1 or k in ("lluvia", "tormenta", "llovizna")]
+    total = sum(mm for _, mm, _ in horas)
+    pico = max(horas, key=lambda x: x[1])
+    top = y0 + EXTRA_HORAS
+    txt(ax, 56, y0 + 325, f"LLUVIA DE HOY POR HORAS · {datos['ciudad']}", size=27, ha="left", color=AZUL)
+    stroke(ax, [[56, y0 + 297], [56 + 560, y0 + 297]], color=AZUL, lw=4, amp=1.5)
+    if mojadas:
+        res = f"Llueve {' y '.join(_rangos(mojadas)[:3])}"
+        if pico[1] >= 0.1:
+            res += f" · máx {pico[1]:g} mm/h a las {pico[0]} h · total ~{total:.1f} mm"
+    else:
+        res = "Sin lluvia apreciable en las horas que quedan"
+    txt(ax, 56, y0 + 262, res, size=21, ha="left", color=NEGRO)
+    pr = "  ·  ".join(f"{v}% ({a:02d}–{b:02d} h)" for a, b, v in datos["prob"])
+    tor = "  ·  ".join(f"tormenta {v}% ({a:02d}–{b:02d} h)" for a, b, v in datos["tormenta"])
+    txt(ax, 56, y0 + 230, "Probabilidad: " + pr + (f"   |   {tor}" if tor else ""), size=15, ha="left", color="#555a63")
+    n = len(horas)
+    x_ini, x_fin = 110, W - 90
+    slot = min(120, (x_fin - x_ini) / n)
+    base, hmax = y0 + 65, 70
+    mmax = max(2.0, pico[1])
+    stroke(ax, [[x_ini - 30, base], [x_ini + slot * n + 10, base]], color=NEGRO, lw=3, amp=1.0, doble=False)
+    for i, (h, mm, kind) in enumerate(horas):
+        cx = x_ini + slot * (i + 0.5)
+        icon(ax, kind, cx, y0 + 178, min(0.5, slot / 130))
+        if mm > 0:
+            hb = max(8, mm / mmax * hmax)
+            bw = slot * 0.55
+            caja = [[cx - bw / 2, base], [cx + bw / 2, base], [cx + bw / 2, base + hb], [cx - bw / 2, base + hb]]
+            ax.add_patch(MPoly(caja, fc="#8fb3e0", ec="none", zorder=5))
+            stroke(ax, caja, color=AZUL, lw=2.6, amp=0.8, closed=True, z=6, doble=False)
+            txt(ax, cx, base + hb + 14, f"{mm:g}", size=13, color=AZUL)
+        txt(ax, cx, base - 22, f"{h}", size=16, color=NEGRO)
+    txt(ax, x_ini - 55, base - 22, "hora", size=12, color="#7d838c")
+    txt(ax, x_ini - 55, base + hmax / 2, "mm/h", size=12, color="#7d838c")
+
+
 # ───────────────────────── composición ─────────────────────────
 LAYOUT = {
     "tall": dict(box=(40, 40, 860, 1160), pbox=(70, 70, 850, 1130), logo=(905, 975), bub=(1170, 1875), fs=22, pitch=36, wrap=47,
@@ -592,23 +688,24 @@ def postprocesar(fig, salida):
     Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).save(salida)
 
 
-def lienzo():
-    fig = plt.figure(figsize=(W / 100, H / 100), dpi=100, facecolor="#f4f4f0")
+def lienzo(extra=0):
+    """Lienzo de 1920x1200; con extra > 0 añade una franja inferior (coordenadas y negativas)."""
+    fig = plt.figure(figsize=(W / 100, (H + extra) / 100), dpi=100, facecolor="#f4f4f0")
     ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-    for _ in range(26):
-        x, y = rng.uniform(0, W), rng.uniform(0, H)
+    ax.set_xlim(0, W); ax.set_ylim(-extra, H); ax.axis("off")
+    for _ in range(26 + extra // 50):
+        x, y = rng.uniform(0, W), rng.uniform(-extra, H)
         p = wobble([[x, y], [x + rng.uniform(80, 320), y + rng.uniform(-60, 60)]], amp=6, step=20)
         ax.plot(p[:, 0], p[:, 1], color="#c8ccd2", lw=rng.uniform(10, 26), alpha=0.18, solid_capstyle="round", zorder=0)
     return fig, ax
 
 
-def decoraciones(ax, nota="Datos: AEMET OpenData"):
+def decoraciones(ax, nota="Datos: AEMET OpenData", y0=0):
     for k, c in enumerate((NEGRO, AZUL, ROJO, VERDE)):
-        ax.add_patch(FancyBboxPatch((1000 + k * 60, 12), 44, 14, boxstyle="round,pad=0,rounding_size=6", fc=c, ec="#00000066", lw=1.2, zorder=9))
-    for (mx, my, c) in ((24, 1176, ROJO), (1896, 1176, AZUL), (24, 24, VERDE), (1896, 24, AMARILLO)):
+        ax.add_patch(FancyBboxPatch((1000 + k * 60, y0 + 12), 44, 14, boxstyle="round,pad=0,rounding_size=6", fc=c, ec="#00000066", lw=1.2, zorder=9))
+    for (mx, my, c) in ((24, 1176, ROJO), (1896, 1176, AZUL), (24, y0 + 24, VERDE), (1896, y0 + 24, AMARILLO)):
         magnet(ax, mx, my, c, 14)
-    txt(ax, W - 40, 20, nota, size=12, ha="right", color="#8a8f97")
+    txt(ax, W - 40, y0 + 20, nota, size=12, ha="right", color="#8a8f97")
 
 
 def generar_ccaa(clave, ndias, salida, demo=False):
@@ -622,7 +719,9 @@ def generar_ccaa(clave, ndias, salida, demo=False):
     gp = prov_geo()
     lim = limites(gp, cc["provincias"])
     lay = LAYOUT[elegir_layout(lim)]
-    fig, ax = lienzo()
+    horas = horas_hoy(cc)
+    extra = EXTRA_HORAS if horas else 0
+    fig, ax = lienzo(extra)
     proj = Proyeccion(lay["pbox"], *lim)
     ciudades = {n: (cc["ciudades"][n][1], cc["ciudades"][n][2], hoy[n]) for n in hoy}
     dibujar_mapa(ax, proj, gp, cc["provincias"], ciudades, por_zona, lay["box"], cc["mar"])
@@ -636,7 +735,9 @@ def generar_ccaa(clave, ndias, salida, demo=False):
         nota = f"Datos: AEMET · predicción de {ed.day}/{ed.month} {ed:%H:%M}"
     except ValueError:
         nota = "Datos: AEMET OpenData"
-    decoraciones(ax, nota)
+    if horas:
+        panel_horas(ax, horas, -extra)
+    decoraciones(ax, nota, y0=-extra)
     postprocesar(fig, salida)
     plt.close(fig)
     return grupos, firma_avisos(grupos)
