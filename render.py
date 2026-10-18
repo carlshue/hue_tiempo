@@ -425,6 +425,7 @@ def resumen_alertas(grupos, maximo=6):
 
 def preparar(clave, ndias, demo=False):
     cc = C.CCAA[clave]
+    aemet.precargar([v[0] for v in cc["ciudades"].values()])
     pred, elab = {}, []
     for nombre in cc["ciudades"]:
         try:

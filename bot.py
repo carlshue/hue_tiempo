@@ -24,6 +24,7 @@ import render
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip("\"'")  # por si se pegó con comillas o espacios
 URL = f"https://api.telegram.org/bot{TOKEN}"
 
@@ -143,19 +144,25 @@ def mostrar(chat, pantalla, u, wiz=False, msg=None):
 
 # ───────────────────────── envío ─────────────────────────
 def _imagen(clave, dias, nacional=False):
-    """Imagen en caché por hora (la comparten todos los usuarios con los mismos ajustes)."""
-    marca = aemet.hoy_madrid().strftime("%Y%m%d%H")
-    nombre = f"{'esp' if nacional else clave}_{dias}_{marca}.png"
-    ruta = SALIDAS / nombre
-    if not ruta.exists():
+    """Imagen en caché (75 min); la comparten todos los usuarios con los mismos ajustes."""
+    k = "esp" if nacional else clave
+    ruta = SALIDAS / f"{k}_{dias}.png"
+
+    def fresca():
+        return ruta.exists() and time.time() - ruta.stat().st_mtime < 75 * 60
+
+    if not fresca():
         with LOCK_RENDER:
-            if not ruta.exists():
-                for viejo in SALIDAS.glob(f"{'esp' if nacional else clave}_{dias}_*.png"):
-                    viejo.unlink(missing_ok=True)
+            if not fresca():
+                t0 = time.time()
+                log.info("dibujando %s (%d días)…", k, dias)
+                tmp = ruta.with_name(ruta.stem + ".tmp.png")
                 if nacional:
-                    render.generar_nacional(dias, str(ruta))
+                    render.generar_nacional(dias, str(tmp))
                 else:
-                    render.generar_ccaa(clave, dias, str(ruta))
+                    render.generar_ccaa(clave, dias, str(tmp))
+                os.replace(tmp, ruta)
+                log.info("dibujado %s en %.1fs", ruta.name, time.time() - t0)
     return ruta
 
 
@@ -168,7 +175,9 @@ def evaluar(u):
 
 def enviar_a_usuario(u, forzar=False):
     """Devuelve True si ha enviado algo."""
+    log.info("usuario %s: evaluando avisos de %s", u["telegram_id"], u["ccaa"])
     grupos, firma = evaluar(u)
+    log.info("usuario %s: %d grupos de avisos", u["telegram_id"], len(grupos))
     hoy = aemet.hoy_madrid().strftime("%Y-%m-%d")
     if u["modo"] == "adversos" and not forzar:
         db.actualizar(u["telegram_id"], ultima_comprob=hoy)
@@ -189,12 +198,29 @@ def enviar_a_usuario(u, forzar=False):
     return ok
 
 
+def precalentar(ahora):
+    """A partir de :50 dibuja las imágenes de quienes reciben a la hora siguiente, para que el envío sea inmediato."""
+    prox = (ahora.hour + 1) % 24
+    combos = {(x["ccaa"], x["dias"], x["nacional"]) for x in db.activos() if x["hora"] == prox}
+    for clave, dias, nac in sorted(combos):
+        try:
+            _imagen(clave, dias)
+            if nac:
+                _imagen(clave, dias, nacional=True)
+        except Exception:
+            log.exception("error")
+
+
 def planificador():
     """Cada 30 s mira quién toca: hora de envío alcanzada y no comprobado hoy."""
+    ult_pre = None
     while True:
         try:
             ahora = aemet.hoy_madrid()
             hoy = ahora.strftime("%Y-%m-%d")
+            if ahora.minute >= 50 and ult_pre != ahora.strftime("%Y%m%d%H"):
+                ult_pre = ahora.strftime("%Y%m%d%H")
+                precalentar(ahora)
             for u in db.activos():
                 if ahora.hour >= u["hora"] and u.get("ultima_comprob") != hoy:
                     try:
@@ -213,16 +239,31 @@ AYUDA = ("Soy el bot del tiempo cartoony con datos de AEMET.\n\n"
          "/ahora – recibir el mapa ya\n/parar – pausar envíos\n/reanudar – reanudar\n/borrar – borrar mis datos")
 
 
-def enviar_ahora(chat, u):
+def _enviar_ahora(chat, u):
     if not u.get("ccaa"):
         tg("sendMessage", chat_id=chat, text="Primero elige tu comunidad con /start")
         return
-    tg("sendMessage", chat_id=chat, text="Dibujando el mapa… (unos segundos)")
+    tg("sendMessage", chat_id=chat, text="Dibujando el mapa… (la primera vez puede tardar un minuto)")
     try:
         enviar_a_usuario(u, forzar=True)
     except Exception:
         log.exception("error")
         tg("sendMessage", chat_id=chat, text="No he podido obtener los datos de AEMET ahora mismo. Inténtalo en unos minutos.")
+
+
+EN_CURSO = set()
+
+
+def enviar_ahora(chat, u):
+    uid = u["telegram_id"]
+    if uid in EN_CURSO:
+        tg("sendMessage", chat_id=chat, text="Ya lo estoy dibujando, un momento…")
+        return
+    EN_CURSO.add(uid)
+    try:
+        _enviar_ahora(chat, u)
+    finally:
+        EN_CURSO.discard(uid)
 
 
 def on_mensaje(m):

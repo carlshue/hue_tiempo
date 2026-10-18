@@ -1,6 +1,7 @@
 """Acceso a AEMET OpenData con caché en disco, reintentos y espaciado entre peticiones."""
 import io
 import json
+import logging
 import os
 import re
 import tarfile
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import requests
 
+log = logging.getLogger("aemet")
 HERE = Path(__file__).parent
 API = "https://opendata.aemet.es/opendata/api"
 GEOJSON = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-provinces.geojson"
@@ -60,8 +62,16 @@ def _decodificar(b):
 def _get(url, con_clave=True, binario=False, intentos=8):
     headers = {"api_key": os.environ["AEMET_API_KEY"].strip().strip("\"'")} if con_clave else {}
     for i in range(intentos):
-        _espera()
-        r = requests.get(url, headers=headers, timeout=60)
+        if con_clave:   # solo las llamadas con clave cuentan para el límite de AEMET
+            _espera()
+        t0 = time.time()
+        try:
+            r = requests.get(url, headers=headers, timeout=(10, 40))
+        except requests.RequestException as e:
+            log.warning("AEMET %s falló en %.1fs: %s (intento %d/%d)", url.split("/api/")[-1][:60], time.time() - t0, type(e).__name__, i + 1, intentos)
+            time.sleep(3)
+            continue
+        log.info("AEMET %s -> %s en %.1fs", url.split("/api/")[-1][:60], r.status_code, time.time() - t0)
         if r.status_code in (429, 500, 502, 503):
             time.sleep(5 * (i + 1))
             continue
@@ -97,6 +107,20 @@ def forecast(ine, ttl=2 * 3600):
         datos = _cached(f"pred_{ine}.json", ttl, pedir)
     datos = dict(datos, dias=[d for d in datos["dias"] if d["fecha"][:10] >= hoy])
     return datos
+
+
+def precargar(ines, workers=4):
+    """Descarga en paralelo la predicción de varios municipios (las llamadas con clave siguen espaciadas)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def uno(ine):
+        try:
+            return forecast(ine)
+        except Exception as e:
+            log.warning("sin predicción de %s: %s", ine, e)
+
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(uno, ines))
 
 
 def horaria(ine, ttl=3600):
